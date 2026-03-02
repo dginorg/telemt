@@ -16,11 +16,18 @@ use crate::transport::UpstreamManager;
 use super::ConnRegistry;
 use super::codec::WriterCommand;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct RefillDcKey {
+    pub dc: i32,
+    pub family: IpFamily,
+}
+
 #[derive(Clone)]
 pub struct MeWriter {
     pub id: u64,
     pub addr: SocketAddr,
     pub generation: u64,
+    pub contour: Arc<AtomicU8>,
     pub created_at: Instant,
     pub tx: mpsc::Sender<WriterCommand>,
     pub cancel: CancellationToken,
@@ -28,6 +35,29 @@ pub struct MeWriter {
     pub draining: Arc<AtomicBool>,
     pub draining_started_at_epoch_secs: Arc<AtomicU64>,
     pub allow_drain_fallback: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum WriterContour {
+    Warm = 0,
+    Active = 1,
+    Draining = 2,
+}
+
+impl WriterContour {
+    pub(super) fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub(super) fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Warm,
+            1 => Self::Active,
+            2 => Self::Draining,
+            _ => Self::Draining,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,12 +110,18 @@ pub struct MePool {
     pub(super) nat_reflection_cache: Arc<Mutex<NatReflectionCache>>,
     pub(super) writer_available: Arc<Notify>,
     pub(super) refill_inflight: Arc<Mutex<HashSet<SocketAddr>>>,
+    pub(super) refill_inflight_dc: Arc<Mutex<HashSet<RefillDcKey>>>,
     pub(super) conn_count: AtomicUsize,
     pub(super) stats: Arc<crate::stats::Stats>,
     pub(super) generation: AtomicU64,
+    pub(super) active_generation: AtomicU64,
+    pub(super) warm_generation: AtomicU64,
     pub(super) pending_hardswap_generation: AtomicU64,
+    pub(super) pending_hardswap_started_at_epoch_secs: AtomicU64,
+    pub(super) pending_hardswap_map_hash: AtomicU64,
     pub(super) hardswap: AtomicBool,
     pub(super) endpoint_quarantine: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
+    pub(super) kdf_material_fingerprint: Arc<Mutex<HashMap<SocketAddr, u64>>>,
     pub(super) me_pool_drain_ttl_secs: AtomicU64,
     pub(super) me_pool_force_close_secs: AtomicU64,
     pub(super) me_pool_min_fresh_ratio_permille: AtomicU32,
@@ -233,11 +269,17 @@ impl MePool {
             nat_reflection_cache: Arc::new(Mutex::new(NatReflectionCache::default())),
             writer_available: Arc::new(Notify::new()),
             refill_inflight: Arc::new(Mutex::new(HashSet::new())),
+            refill_inflight_dc: Arc::new(Mutex::new(HashSet::new())),
             conn_count: AtomicUsize::new(0),
             generation: AtomicU64::new(1),
+            active_generation: AtomicU64::new(1),
+            warm_generation: AtomicU64::new(0),
             pending_hardswap_generation: AtomicU64::new(0),
+            pending_hardswap_started_at_epoch_secs: AtomicU64::new(0),
+            pending_hardswap_map_hash: AtomicU64::new(0),
             hardswap: AtomicBool::new(hardswap),
             endpoint_quarantine: Arc::new(Mutex::new(HashMap::new())),
+            kdf_material_fingerprint: Arc::new(Mutex::new(HashMap::new())),
             me_pool_drain_ttl_secs: AtomicU64::new(me_pool_drain_ttl_secs),
             me_pool_force_close_secs: AtomicU64::new(me_pool_force_close_secs),
             me_pool_min_fresh_ratio_permille: AtomicU32::new(Self::ratio_to_permille(
@@ -258,7 +300,11 @@ impl MePool {
     }
 
     pub fn current_generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+        self.active_generation.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn warm_generation(&self) -> u64 {
+        self.warm_generation.load(Ordering::Relaxed)
     }
 
     pub fn update_runtime_reinit_policy(
