@@ -793,6 +793,48 @@ impl Default for LinksConfig {
     }
 }
 
+/// API settings for control-plane endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApiConfig {
+    /// Enable or disable REST API.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Listen address for API in `IP:PORT` format.
+    #[serde(default = "default_api_listen")]
+    pub listen: String,
+
+    /// CIDR whitelist allowed to access API.
+    #[serde(default = "default_api_whitelist")]
+    pub whitelist: Vec<IpNetwork>,
+
+    /// Optional static value for `Authorization` header validation.
+    /// Empty string disables header auth.
+    #[serde(default)]
+    pub auth_header: String,
+
+    /// Maximum accepted HTTP request body size in bytes.
+    #[serde(default = "default_api_request_body_limit_bytes")]
+    pub request_body_limit_bytes: usize,
+
+    /// Read-only mode: mutating endpoints are rejected.
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_api_listen(),
+            whitelist: default_api_whitelist(),
+            auth_header: String::new(),
+            request_body_limit_bytes: default_api_request_body_limit_bytes(),
+            read_only: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
@@ -828,6 +870,9 @@ pub struct ServerConfig {
     #[serde(default = "default_metrics_whitelist")]
     pub metrics_whitelist: Vec<IpNetwork>,
 
+    #[serde(default, alias = "admin_api")]
+    pub api: ApiConfig,
+
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
 }
@@ -844,6 +889,7 @@ impl Default for ServerConfig {
             proxy_protocol: false,
             metrics_port: None,
             metrics_whitelist: default_metrics_whitelist(),
+            api: ApiConfig::default(),
             listeners: Vec::new(),
         }
     }
